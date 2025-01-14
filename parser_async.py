@@ -18,53 +18,80 @@ from models.spimex_trading_results import SpimexTradingResult
 Base = declarative_base()
 
 
-async def fetch(session, url):
+async def fetch(session: aiohttp.ClientSession, url: str) -> Optional[str]:
+    """
+       Загружает содержимое страницы по указанному URL.
+
+       :param session: Сессия aiohttp для выполнения запросов.
+       :param url: URL страницы, которую нужно загрузить.
+       :return: Содержимое страницы в виде строки или None в случае ошибки.
+       """
     async with session.get(url) as response:
-        response.raise_for_status()  # Проверка на ошибки HTTP
-        return await response.text()
-
-
-async def download_file(session, file_link, trade_date):
-    async with session.get(file_link) as file_response:
-        file_response.raise_for_status()
-        with open(f'data/oil_bulletin{trade_date}.xls', 'wb') as f:
-            f.write(await file_response.read())
-        print(f"Файл oil_bulletin{trade_date}.xls успешно скачан.")
-
-
-async def parsing_trading_on_file() -> datetime.date:
-    async with aiohttp.ClientSession() as session:
-        html_content = await fetch(session, URL)
-        soup = BeautifulSoup(html_content, 'html.parser')
-
-        # Извлечение ссылки на файл
-        link_tag = soup.find('a', class_='accordeon-inner__item-title link xls',
-                             string='Бюллетень по итогам торгов в Секции «Нефтепродукты»')
-        if link_tag:
-            file_link = link_tag['href']
-            if not file_link.startswith('http'):
-                file_link = urljoin(URL, file_link)
-
-            match = re.search(r'_(\d{14})\.xls', file_link)
-            if match:
-                date_str = match.group(1)  # Получаем строку даты
-                # Преобразуем строку в объект datetime
-                trade_date = datetime.datetime.strptime(date_str, '%Y%m%d%H%M%S').date()
-                print(f'Дата торгов: {trade_date}')
-
-                await download_file(session, file_link, trade_date)
-                return trade_date
-            else:
-                print("Не удалось извлечь дату из имени файла.")
+        if response.status == 200:
+            return await response.text()
         else:
-            print("Не удалось найти ссылку на файл.")
+            print(f"Ошибка при загрузке страницы: {response.status}")
+            return None
+
+
+async def download_file(session: aiohttp.ClientSession, trade_date: datetime.date, file_link: str) -> None:
+    """
+    Загружает файл по указанной ссылке и сохраняет его с именем, основанным на дате торговли.
+
+    :param session: Сессия aiohttp для выполнения запросов.
+    :param trade_date: Дата торговли, используемая для формирования имени файла.
+    :param file_link: Ссылка на файл для загрузки.
+    """
+    async with session.get(file_link) as file_response:
+        if file_response.status == 200:
+            file_name = f'data/oil_bulletin{trade_date}.xls'
+            with open(file_name, 'wb') as f:
+                f.write(await file_response.read())
+            print(f"Файл {file_name} успешно скачан.")
+        else:
+            print(f"Ошибка при загрузке файла: {file_response.status}")
+
+
+async def parsing_trading_on_file(session, URL) -> datetime.date:
+    """
+    Извлекает дату торгов и соответствующую ссылку на файл с сайта
+    :param session: session: Сессия aiohttp для выполнения запросов.
+    :param URL: URL страницы, которую нужно загрузить.
+    :return: trade_date: Дата торговли, используемая для формирования имени файла.
+    """
+    html_content = await fetch(session, URL)
+    soup = BeautifulSoup(html_content, 'html.parser')
+
+    # Извлечение ссылки на файл
+    link_tag = soup.find('a', class_='accordeon-inner__item-title link xls',
+                         string='Бюллетень по итогам торгов в Секции «Нефтепродукты»')
+    if link_tag:
+        file_link = link_tag['href']
+        if not file_link.startswith('http'):
+            file_link = urljoin(URL, file_link)
+
+        match = re.search(r'_(\d{14})\.xls', file_link)
+        if match:
+            date_str = match.group(1)  # Получаем строку даты
+            # Преобразуем строку в объект datetime
+            trade_date = datetime.datetime.strptime(date_str, '%Y%m%d%H%M%S').date()
+            print(f'Дата торгов: {trade_date}')
+
+            await download_file(session, file_link, trade_date)
+            return trade_date
+        else:
+            print("Не удалось извлечь дату из имени файла.")
+    else:
+        print("Не удалось найти ссылку на файл.")
     return None
 
 
 async def get_data(trade_date: datetime.date) -> Optional[pd.DataFrame]:
     """
-    Извлекает данные из файла бюллетеня по итогам торгов в Секции «Нефтепродукты»
-    для заданной даты. Возвращает DataFrame с обработанными данными.
+    Загружает данные из Excel-файла и возвращает DataFrame с нужной структурой.
+
+    :param trade_date: Дата торговли, используемая для формирования имени файла.
+    :return: DataFrame с данными торговли или None, если данные отсутствуют или файл не найден.
     """
     try:
         temp_df = pd.read_excel(f'data/oil_bulletin{trade_date}.xls', header=None)
@@ -124,6 +151,8 @@ async def get_data(trade_date: datetime.date) -> Optional[pd.DataFrame]:
 async def save_data_to_db(spimex_trading_results: pd.DataFrame) -> None:
     """
     Сохраняет данные из DataFrame в базу данных.
+
+    :param spimex_trading_results: DataFrame с данными торговли для сохранения.
     """
     engine = create_async_engine(DATABASE_URL, future=True, echo=True)
     async_session = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
